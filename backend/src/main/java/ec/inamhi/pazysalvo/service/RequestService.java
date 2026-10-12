@@ -19,6 +19,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.util.List;
 import java.util.Map;
@@ -27,8 +29,11 @@ import java.util.HashMap;
 @Service
 public class RequestService {
 
+    private record NotificationRecipient(String username, String email) { }
+
     private final RequestRepository requestRepository;
     private final AuditRepository auditRepository;
+    private final AuditService auditService;
     private final QuestionCatalog questionCatalog;
     private final NotificationService notificationService;
     private final UserRepository userRepository;
@@ -37,6 +42,7 @@ public class RequestService {
 
     public RequestService(RequestRepository requestRepository,
                           AuditRepository auditRepository,
+                          AuditService auditService,
                           QuestionCatalog questionCatalog,
                           NotificationService notificationService,
                           UserRepository userRepository,
@@ -44,6 +50,7 @@ public class RequestService {
                           PasswordEncoder passwordEncoder) {
         this.requestRepository = requestRepository;
         this.auditRepository = auditRepository;
+        this.auditService = auditService;
         this.questionCatalog = questionCatalog;
         this.notificationService = notificationService;
         this.userRepository = userRepository;
@@ -72,8 +79,8 @@ public class RequestService {
             command.fullName().trim(),
             identification,
             command.email().trim(),
-            null,
-            null,
+            command.jobTitle() == null || command.jobTitle().isBlank() ? null : command.jobTitle().trim(),
+            command.workUnit().trim(),
             command.employmentType(),
             command.startDate(),
             command.departureDate(),
@@ -84,15 +91,22 @@ public class RequestService {
             command.canton(),
             command.emergencyContact(),
             command.secondaryEmail(),
-            null,
-            null
+            command.workplace() == null || command.workplace().isBlank() ? null : command.workplace().trim(),
+            command.occupationalGroup() == null || command.occupationalGroup().isBlank()
+                ? null : command.occupationalGroup().trim()
         );
 
-        UserAccount directionResponsible = userRepository.findById(command.directionResponsibleId())
+        List<UserAccount> directorsForUnit = userRepository
+            .findAllByRoleAndArea(UserRole.RESPONSABLE_AREA, Area.DIRECCION_UNIDAD).stream()
             .filter(UserAccount::isEnabled)
-            .filter(user -> user.getRole() == UserRole.RESPONSABLE_AREA && user.getArea() == Area.DIRECCION_UNIDAD)
-            .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                "Selecciona un responsable activo de Dirección / unidad."));
+            .filter(user -> sameUnit(user.getWorkUnit(), command.workUnit()))
+            .toList();
+        if (directorsForUnit.size() != 1
+            || !directorsForUnit.getFirst().getId().equals(command.directionResponsibleId())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                "Debe existir exactamente un director activo para la unidad seleccionada.");
+        }
+        UserAccount directionResponsible = directorsForUnit.getFirst();
 
         Map<String, UserAccount> questionOwners = new HashMap<>();
         List<String> unassignedQuestions = new java.util.ArrayList<>();
@@ -145,6 +159,10 @@ public class RequestService {
 
         EmployeeRequest saved = requestRepository.save(request);
         audit(saved, "SOLICITUD_CREADA", actor, "Solicitud registrada");
+        saved.getSections().stream()
+            .filter(section -> section.getStatus() == SectionStatus.EN_CURSO)
+            .findFirst()
+            .ifPresent(section -> notifyUnlockedSectionAfterCommit(saved, section));
         return saved;
     }
 
@@ -175,7 +193,8 @@ public class RequestService {
                 "La Dirección / unidad debe corresponder al área asignada a tu cuenta de director.");
         }
         request.updateWorkDetails(workplace, occupationalGroup.trim(), workUnit.trim(), jobTitle.trim());
-        audit(request, "DATOS_LABORALES_GUARDADOS", actor.getUsername(), "Datos laborales completados por responsable de unidad");
+        audit(request, "DATOS_LABORALES_GUARDADOS", actor.getUsername(),
+            "Actualizó lugar de trabajo, grupo ocupacional, dirección/unidad y cargo desempeñado.");
         return request;
     }
 
@@ -187,6 +206,11 @@ public class RequestService {
             passwordEncoder.encode(password), UserRole.SOLICITANTE, null);
         account.setTrackedRequest(request);
         userRepository.save(account);
+        Long requestId = request.getId();
+        String employeeName = request.getFullName();
+        String email = request.getEmail();
+        afterCommit(() -> notificationService.notifyApplicantCredentials(
+            requestId, employeeName, email, normalizedUsername, password));
     }
 
     @Transactional(readOnly = true)
@@ -195,18 +219,21 @@ public class RequestService {
     }
 
     @Transactional
-    public void deleteRequest(Long requestId) {
+    public void deleteRequest(Long requestId, String actor) {
         EmployeeRequest request = load(requestId);
+        audit(request, "SOLICITUD_ELIMINADA", actor,
+            "Se eliminó la solicitud de " + request.getFullName());
         signedDocumentService.deleteStoredFiles(request);
         userRepository.findByTrackedRequestId(requestId).ifPresent(userRepository::delete);
-        auditRepository.deleteByRequestId(requestId);
         requestRepository.delete(request);
     }
 
     @Transactional(readOnly = true)
     public List<EmployeeRequest> findVisibleTo(UserAccount actor) {
         if (actor.getRole() == UserRole.SOLICITANTE) {
-            return actor.getTrackedRequest() == null ? List.of() : List.of(actor.getTrackedRequest());
+            return requestRepository.findTrackedRequestByUserId(actor.getId())
+                .map(List::of)
+                .orElseGet(List::of);
         }
         List<EmployeeRequest> requests = requestRepository.findAll();
         if (actor.getRole() == UserRole.TALENTO_HUMANO) {
@@ -214,7 +241,8 @@ public class RequestService {
         }
         return requests.stream()
             .filter(request -> request.getSections().stream().anyMatch(section ->
-                section.getAnswers().stream().anyMatch(answer -> isAssignedTo(answer, section, actor))))
+                section.getStatus() == SectionStatus.EN_CURSO
+                    && section.getAnswers().stream().anyMatch(answer -> isAssignedTo(answer, section, actor))))
             .toList();
     }
 
@@ -227,7 +255,7 @@ public class RequestService {
     public EmployeeRequest findVisibleById(Long id, UserAccount actor) {
         EmployeeRequest request = load(id);
         if (actor.getRole() == UserRole.SOLICITANTE) {
-            if (actor.getTrackedRequest() == null || !actor.getTrackedRequest().getId().equals(id)) {
+            if (requestRepository.findTrackingUserLink(actor.getId(), id).isEmpty()) {
                 throw new ResponseStatusException(HttpStatus.NOT_FOUND, "No se encontró tu solicitud.");
             }
             return request;
@@ -236,7 +264,8 @@ public class RequestService {
             return request;
         }
         boolean assigned = request.getSections().stream().anyMatch(section ->
-            section.getAnswers().stream().anyMatch(answer -> isAssignedTo(answer, section, actor)));
+            section.getStatus() == SectionStatus.EN_CURSO
+                && section.getAnswers().stream().anyMatch(answer -> isAssignedTo(answer, section, actor)));
         if (!assigned) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND,
                 "No se encontró una solicitud asignada a tu cuenta.");
@@ -256,6 +285,7 @@ public class RequestService {
                 "Completa y guarda los datos laborales antes de responder y firmar el apartado.");
         }
 
+        List<String> changedQuestions = new java.util.ArrayList<>();
         for (AnswerUpdate update : updates) {
             if (update.answerValue() != null && !update.answerValue().isBlank()
                 && !"SI".equals(update.answerValue()) && !"NO".equals(update.answerValue())) {
@@ -276,10 +306,12 @@ public class RequestService {
                     "Esta pregunta ya fue firmada y no se puede editar.");
             }
             answer.update(update.answerValue(), update.detail(), update.amount());
+            changedQuestions.add(answer.getQuestionKey());
         }
 
         audit(request, "RESPUESTAS_GUARDADAS", actor.getUsername(),
-            "Se actualizaron respuestas de " + section.getArea());
+            "Se actualizaron respuestas de " + section.getArea() + "; preguntas: "
+                + String.join(", ", changedQuestions));
         return request;
     }
 
@@ -304,7 +336,7 @@ public class RequestService {
         }
         if (actorAnswers.stream().anyMatch(answer -> answer.getSignedDocumentPath() == null)) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
-                "Firma en FirmaEC el PDF de tus preguntas asignadas y cárgalo al sistema.");
+                "Firma tus preguntas con tu certificado P12 desde el botón de firma del sistema.");
         }
         if (section.getAnswers().stream().anyMatch(answer -> answer.getSignedAt() == null)) {
             audit(request, "PREGUNTAS_FIRMADAS", actor.getUsername(),
@@ -326,15 +358,46 @@ public class RequestService {
             next.setStatus(SectionStatus.EN_CURSO);
             audit(request, "AREA_CONFIRMADA", actor.getUsername(),
                 section.getArea() + " completada; se habilitó " + next.getArea());
-            java.util.stream.Stream.concat(
-                    next.getAnswers().stream().map(answer -> answer.getAssignedUser() == null
-                        ? next.getAssignedUser() : answer.getAssignedUser()),
-                    java.util.stream.Stream.of(next.getAssignedUser()))
-                .filter(java.util.Objects::nonNull)
-                .distinct()
-                .forEach(user -> notificationService.notifyUser(request, user));
+            notifyUnlockedSectionAfterCommit(request, next);
+        }
+        if (next == null) {
+            String applicantEmail = request.getEmail();
+            String employeeName = request.getFullName();
+            afterCommit(() -> notificationService.notifyFinalSigner(
+                requestId, employeeName, applicantEmail));
         }
         return request;
+    }
+
+    private void notifyUnlockedSectionAfterCommit(EmployeeRequest request, AreaSection section) {
+        if (section.getStatus() != SectionStatus.EN_CURSO) {
+            return;
+        }
+        Map<Long, NotificationRecipient> recipients = new java.util.LinkedHashMap<>();
+        section.getAnswers().stream()
+            .map(answer -> answer.getAssignedUser() == null ? section.getAssignedUser() : answer.getAssignedUser())
+            .filter(java.util.Objects::nonNull)
+            .filter(UserAccount::isEnabled)
+            .forEach(user -> recipients.putIfAbsent(user.getId(), new NotificationRecipient(
+                user.getUsername(), user.getEmail())));
+        String employeeName = request.getFullName();
+        Long requestId = request.getId();
+        Area area = section.getArea();
+        afterCommit(() -> recipients.values().forEach(recipient -> notificationService.notifyNextSection(
+            requestId, employeeName, area, recipient.username(), recipient.email())));
+    }
+
+    private void afterCommit(Runnable action) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            action.run();
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                action.run();
+            }
+        });
     }
 
     @Transactional
@@ -362,6 +425,11 @@ public class RequestService {
     public List<AuditEntry> history(Long requestId) {
         load(requestId);
         return auditRepository.findByRequestIdOrderByOccurredAtDesc(requestId);
+    }
+
+    @Transactional(readOnly = true)
+    public List<AuditEntry> auditHistory() {
+        return auditService.findAll();
     }
 
     private AreaSection loadAssignedActiveSection(EmployeeRequest request, Long sectionId,
@@ -415,6 +483,6 @@ public class RequestService {
     }
 
     private void audit(EmployeeRequest request, String action, String actor, String details) {
-        auditRepository.save(new AuditEntry(request.getId(), action, actor, details));
+        auditService.record(request.getId(), action, actor, details);
     }
 }

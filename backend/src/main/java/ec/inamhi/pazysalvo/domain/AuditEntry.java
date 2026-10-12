@@ -32,14 +32,22 @@ public class AuditEntry {
     @Column(length = 2000)
     private String details;
 
+    @Column(length = 45)
+    private String ipAddress;
+
     protected AuditEntry() {
     }
 
     public AuditEntry(Long requestId, String action, String actor, String details) {
+        this(requestId, action, actor, details, null);
+    }
+
+    public AuditEntry(Long requestId, String action, String actor, String details, String ipAddress) {
         this.requestId = requestId;
         this.action = action;
         this.actor = actor;
         this.details = details;
+        this.ipAddress = ipAddress;
     }
 
     public Long getId() { return id; }
@@ -48,4 +56,5 @@ public class AuditEntry {
     public String getActor() { return actor; }
     public Instant getOccurredAt() { return occurredAt; }
     public String getDetails() { return details; }
+    public String getIpAddress() { return ipAddress; }
 }

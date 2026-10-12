@@ -6,12 +6,22 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.Map;
 import java.util.stream.Collectors;
 
 @RestControllerAdvice
 public class ApiValidationAdvice {
+
+    @ExceptionHandler(ResponseStatusException.class)
+    public ResponseEntity<Map<String, String>> responseStatus(ResponseStatusException exception) {
+        String detail = exception.getReason() == null
+            ? "No se pudo completar la operación."
+            : exception.getReason();
+        return ResponseEntity.status(exception.getStatusCode())
+            .body(Map.of("detail", detail));
+    }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<Map<String, String>> invalidFields(MethodArgumentNotValidException exception) {

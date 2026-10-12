@@ -255,6 +255,24 @@ Al crear o editar una cuenta como Director de unidad, Dirección / unidad se eli
 
 La captura mostró `403 Invalid CORS request` al actualizar `/api/users/{id}`. La edición usa el método HTTP `PATCH`, pero la configuración CORS de Spring Boot no lo permitía. Se añadió `PATCH` y el origen local `http://127.0.0.1:4200` junto a `http://localhost:4200`. `mvn compile` terminó correctamente. Hay que reiniciar Spring Boot para que empiece a aceptar la actualización; después recarga Angular e intenta guardar otra vez.
 
+### Acceso de pruebas desde otra PC en la red local
+
+Angular debe iniciarse con `npm start -- --host 0.0.0.0`; el proxy de desarrollo reenvía `/api` al backend en `localhost:8081`. Para el origen LAN observado en la prueba, `http://10.224.159.103:4200`, se agregó permiso CORS en `SecurityConfig` y en los controladores `AuthController`, `RequestController` y `ReportController`, cuyas anotaciones CORS restringían el acceso a localhost. Reiniciar Spring Boot después de este cambio y volver a intentar el inicio de sesión desde la otra PC. Si la dirección IP cambia, actualizar el origen permitido en esos archivos.
+
+### Exportación y consulta de auditoría
+
+La exportación CSV usaba comas, por lo que Excel con configuración regional en español mostraba cada registro en una sola columna. Ahora ambas exportaciones utilizan punto y coma y la directiva `sep=;` para que Excel distribuya correctamente los campos. Se agregó `GET /api/reports/audit`, restringido a Talento Humano, y el botón **Ver auditoría** en el frontend para consultar el historial global con solicitud, usuario, fecha, IP y detalle. Se conserva también el historial individual desde cada solicitud.
+
+Se ajustó la codificación de los CSV a UTF-16LE con BOM para que Excel de Windows conserve tildes y eñes al abrirlos directamente. En la auditoría, el backend usa la IP remota y, cuando la petición llega a través del proxy local de Angular, lee el último valor de `X-Forwarded-For`; el proxy de desarrollo ahora habilita ese encabezado. Los registros históricos cuyo campo IP ya quedó vacío no pueden reconstruirse retroactivamente; las acciones nuevas se capturarán tras reiniciar ambos servidores.
+
+El reporte general ahora omite filas de preguntas sin respuesta; solo exporta las respuestas registradas. La IP de auditoría corresponde al cliente que realizó la acción (por ejemplo, el equipo del compañero al acceder desde otra PC); una acción ejecutada desde el navegador local podría quedar como loopback, y los eventos antiguos sin IP no se pueden completar después.
+
+El solicitante ve ahora el avance global incluyendo la etapa de firma final. Cuando todas las áreas han firmado, el solicitante firma el PDF consolidado con su certificado; al pasar a revisión puede descargar ese documento. La decisión final de aprobar o negar permanece en la vista de Talento Humano. El endpoint de descarga permite al solicitante vinculado acceder únicamente al PDF final de su propia solicitud, y valida que ya exista.
+
+Las notificaciones de responsables siguen la secuencia: solo se envían después de confirmar la transacción que activa su sección. La bandeja de responsables ahora muestra únicamente solicitudes con sección `EN_CURSO` y preguntas asignadas a esa cuenta, evitando que vean etapas futuras antes de recibir el aviso. Las credenciales del solicitante se siguen enviando al crear la solicitud, y su aviso de firma final se envía cuando todas las áreas completan sus firmas.
+
+Al editar el perfil de un director, los cambios de nombre, usuario o correo ya no vuelven a validar asignaciones de preguntas heredadas. Esa validación ocurre cuando cambia el área o la unidad, evitando que una asignación anterior invalide la edición de datos de contacto.
+
 ### Error 400 al crear usuarios
 
 La captura reportó `400 Bad Request` en `/api/users`. Para impedir que el formulario envíe campos incompatibles con las validaciones de Spring, se alinearon las reglas visibles de usuario (3–60 caracteres permitidos), nombre, correo y contraseña. Se agregó una respuesta de validación legible para indicar el campo o formato rechazado por la API. Compilaciones Angular y Maven completadas. Reiniciar ambos procesos antes de volver a crear la cuenta; el nuevo mensaje dará el detalle si algún dato aún no cumple.
@@ -280,3 +298,97 @@ Se corrigió la verificación previa del formulario. Antes, comparaba las pregun
 ### Guardado de datos laborales y respuestas de Dirección / unidad
 
 La captura mostró que los selectores laborales se renderizaban demasiado estrechos por una regla CSS global aplicada a todos los `select.control`; se limitó esa regla al filtro de la bandeja y se ajustó la cuadrícula de datos laborales. El guardado ahora conserva valores que ya están cargados en la solicitud o en la cuenta del director, exige los cuatro datos y mantiene la Dirección/unidad dentro del área asignada. Las respuestas y la generación de PDF de esa primera etapa quedan deshabilitadas hasta guardar los datos laborales, evitando respuestas HTTP 409 por intentar continuar antes de completar la etapa. Verificación: `npm run build`, `mvn -q -DskipTests compile` y `git diff --check` completados. El HTTP 500 al cargar `/api/requests` no se puede atribuir con certeza a partir de la captura de DevTools; se necesita la excepción completa de la terminal de Spring Boot.
+
+### Firma directa con certificado P12 (apartados y documento final)
+
+Se cambió el flujo de firma para que cada responsable firme desde el botón **Firmar electrónicamente**. El sistema prepara el PDF en memoria, solicita el certificado `.p12`/`.pfx` y su contraseña, y genera una firma criptográfica PAdES dentro del backend. Una sola firma cubre todas las preguntas que ese responsable tiene pendientes en el apartado. Se añadió el mismo flujo para la firma final del servidor saliente: el solicitante genera y firma el documento consolidado sin descargarlo y volverlo a cargar. El endpoint final valida que la cuenta solicitante esté vinculada a esa solicitud y que el flujo de áreas haya concluido. Se quitaron del API los endpoints anteriores que aceptaban PDFs firmados subidos manualmente, para evitar que se omita la firma por certificado.
+
+El certificado y la contraseña no se almacenan; se limitan a la operación, y el PDF firmado se guarda en el directorio configurado con SHA-256 y auditoría. La cuenta de seguimiento recibe sus propios datos, respuestas y nombres/firmas de las áreas para generar el documento consolidado. Se aumentó el máximo de solicitud multipart a 32 MB para acomodar documento y certificado. Dependencias agregadas: Apache PDFBox 3.0.8 y Bouncy Castle 1.85.
+
+**Límites actuales:** se verifica integridad criptográfica al firmar, vigencia temporal del certificado y uso de clave de firma. No está integrada la confianza institucional de la CA, revocación OCSP/CRL, sellado de tiempo ni validación LTV; esas comprobaciones requieren la cadena y servicios institucionales. El despliegue productivo debe usar HTTPS.
+
+**Verificación:** compilación Maven `mvn -q -DskipTests compile`, `npm run build` y `git diff --check` ejecutados correctamente después de los cambios. Angular muestra advertencias CommonJS de dependencias usadas por generación de PDF. No se ejecutaron pruebas automatizadas ni una firma real con un certificado P12.
+
+### Firma generada en backend y notificaciones en cadena
+
+Se ajustó la firma para que Angular envíe únicamente el archivo P12/PFX y su contraseña. `SignedDocumentService` obtiene las respuestas guardadas, genera el PDF del apartado dentro del backend en memoria, firma ese PDF y almacena solo el resultado firmado. El PDF final también se genera en backend y el servidor valida que todas las áreas y preguntas estén firmadas antes de aceptar la firma del solicitante. Se eliminó la generación de PDF en Angular para estas firmas.
+
+Al crear una solicitud se notifica al responsable inicial. Cuando el último responsable de una etapa firma y la siguiente sección se habilita, se envía un correo a cada responsable asignado a esa sección. Cuando finalizan todas las áreas, se notifica al solicitante para que firme el PDF consolidado. Los avisos se ejecutan después del commit de PostgreSQL para no notificar una transición que no se haya guardado. Si SMTP falla, se registra en el log y no se revierte la firma; para recibir correos deben configurarse `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD` y `MAIL_FROM`.
+
+El backend valida el estado y asignaciones, bloquea la edición de respuestas firmadas, registra SHA-256/auditoría y no persiste el P12 ni la contraseña. Verificación: `mvn -q -DskipTests compile`, `npm run build` y `git diff --check` completados. No se ejecutaron pruebas automatizadas, envío SMTP real ni firma con certificado P12 real.
+
+### Ajustes al catálogo de preguntas enviados por el usuario
+
+Se actualizaron las dos preguntas de Dirección / unidad indicadas y se corrigieron espacios/acentos y la redacción repetida de la segunda. Recepción de documentos queda con una sola pregunta (“Se recibió el documento de paz y salvo”). Se adaptaron los campos escritos para las claves de Dirección / unidad, Gestión administrativa, Gestión financiera, TIC, Recursos Humanos y Recepción. Se corrigió la coma sobrante en `List.of(...)`, que impedía compilar el catálogo. Verificación: `mvn -q -DskipTests compile` y `git diff --check` completados. Estos cambios afectan solicitudes nuevas; los registros existentes conservan las preguntas guardadas al crearlos.
+
+### Ocultar detalle genérico en preguntas sin campos escritos
+
+Se eliminó del formulario Angular el fallback que insertaba “Detalle u observación” cada vez que una pregunta tenía `writingFields` vacío. Ahora solo aparecen los campos definidos en `QuestionCatalog.writingFieldsForKey`; las preguntas sin campos requieren únicamente Sí/No. La validación del frontend y backend acepta preguntas sin campos adicionales y no exige un detalle oculto. El mapper y el PDF del servidor usan la configuración actual del catálogo para las preguntas estándar, incluso en solicitudes existentes. Verificación: `npm run build`, `mvn -q -DskipTests compile` y `git diff --check` completados. Reinicia el backend y recarga Angular con Ctrl+F5.
+
+### Seguimiento del solicitante y corrección de carga de solicitud vinculada
+
+Se corrigió la consulta de solicitudes del rol SOLICITANTE para obtener la solicitud asociada a su cuenta con sus secciones, respuestas y responsables cargados explícitamente. Esto evita serializar relaciones JPA perezosas fuera de su sesión y corrige el 500 que impedía mostrar el trámite. Se ajustó también la autorización de consulta y firma final para comprobar el vínculo mediante el ID de cuenta, sin navegar una relación JPA diferida del usuario autenticado.
+
+La vista de seguimiento ahora muestra por cada área el estado, nombre de cada responsable, cuántas preguntas tiene asignadas y cuántas firmó; indica las pendientes y marca si la cuenta responsable está inactiva. Los correos de responsables no se exponen a la cuenta solicitante. Verificación: compilación Maven y `npm run build` completados. No se probó con el PostgreSQL local ni con una cuenta ya existente; hay que reiniciar ambos procesos y confirmar que `tracked_request_id` de la cuenta solicitante apunte a la solicitud.
+
+### Error de arranque por método derivado de Spring Data
+
+El log enviado identificó que `existsByIdAndTrackedRequest_Id` estaba declarado en `RequestRepository`, cuyo tipo de entidad es `EmployeeRequest`. Spring intentaba buscar `trackedRequest` en esa entidad y no encontraba la propiedad, por eso fallaba la creación del repositorio y en cadena `RequestService` y `ReportController`. Se eliminó ese método derivado y se reemplazó por una consulta JPQL explícita que busca el vínculo desde `UserAccount`, donde sí existe `trackedRequest`. La consulta se usa en la autorización de consulta de la solicitud y de firma final del solicitante. Verificación: `mvn -q -DskipTests compile` completado. No se ejecutó una segunda instancia del backend porque Docker ya tiene el API activo; reiniciar el backend que usa el usuario para validar el inicio.
+
+### Firma DEMO para prácticas sin certificado ni carga de PDF
+
+Se conectó el modo de firma de prueba que el usuario estaba desarrollando. La ventana de firma ahora permite elegir explícitamente **Firma de prueba**; Angular llama a rutas separadas `/sign-demo` y `/sign-final-demo`, que no solicitan P12, contraseña ni PDF subido. El backend genera los PDF a partir del trámite y les estampa el rótulo `FIRMA DEMO - SIN VALIDEZ ELECTRONICA`; las auditorías también identifican las operaciones como DEMO. Se conserva el flujo normal P12 en sus rutas originales. Esta firma de práctica permite probar la transición de etapas, pero no debe usarse en producción ni presentarse como firma electrónica válida. Verificación: `mvn -q -DskipTests compile`, `npm run build` y `git diff --check` completados; no se probó el recorrido en el navegador.
+
+### Diagnóstico visible al fallar una firma DEMO
+
+El usuario avanzó Dirección / unidad y reportó `409 Conflict` al firmar Gestión administrativa. Se añadió una respuesta JSON `detail` para errores `ResponseStatusException`, de modo que Angular pueda mostrar el motivo en vez del genérico `Http failure response`. La validación DEMO ahora enumera las preguntas sin respuesta o con campos escritos incompletos. La ayuda y el mensaje después de guardar respuestas ya no dicen que siempre hay que cargar P12. Verificación: Maven compile, Angular build y `git diff --check` completados. Reiniciar el backend y Angular antes de probar otra vez; el nuevo mensaje identificará qué respuesta/campo de la sección falta, si esa es la causa del 409.
+
+La nueva captura mostró que los montos escritos en las preguntas 3 y 4 de Gestión administrativa no estaban llegando al backend como `amount`, aunque aparecían en los controles. El control Angular se cambió a conversión explícita a número al editar y antes de guardar; así el backend recibe `BigDecimal` y la validación reconoce esos importes. Verificación: `npm run build` completado. Recargar Angular y guardar/resolicitar la firma DEMO otra vez.
+
+El usuario reportó que persistía el 409, y la captura reveló además un error de expresión regular HTML en el campo de nombre (la clase de caracteres no era válida bajo el modo Unicode `v` de Chrome). Se forzó una conversión adicional del importe al crear el payload de guardado y firma, y se cambió el guion de las reglas `pattern` por `\x2D` para evitar el error de sintaxis del navegador. Verificación: Angular `npm run build` completado. Recargar la interfaz con Ctrl+F5; verificar si el 409 desaparece y si no, el detalle actualizado debe señalar específicamente la causa.
+
+Una captura posterior siguió identificando los montos de “deducibles” y “pasajes aéreos” aunque estaban escritos. Se corrigió la discrepancia de persistencia: Angular ahora copia el importe al JSON `detail` además del campo numérico; el backend puede recuperar el `BigDecimal` desde ese dato cuando la columna `amount` llega nula, y lo normaliza antes de validar/generar el PDF. Verificación: `mvn -q -DskipTests compile` y `npm run build` completados. Reiniciar Spring Boot, recargar Angular con Ctrl+F5 y volver a confirmar el apartado.
+
+### Confirmación de notificaciones por correo y destinatario final
+
+Se confirmó que las notificaciones se disparan al habilitar la primera etapa y cada etapa siguiente, y al quedar el trámite listo para firma final. El envío efectivo requiere configurar SMTP (`MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_FROM`) en `.env`; con `MAIL_HOST` vacío no se enviarán correos y el servicio dejará el fallo en el log. Se corrigió el destinatario del aviso final para usar el correo real del servidor saliente (`EmployeeRequest.email`) en lugar del correo interno placeholder `@tracking.local` de la cuenta de seguimiento. Las credenciales de seguimiento no se envían por correo al registrarse. Verificación: `mvn -q -DskipTests compile` completado.
+
+### SMTP Gmail para desarrollo local
+
+Se preparó `.env` (ignorado por Git) con host `smtp.gmail.com`, puerto 587, STARTTLS y autenticación activados. El backend local importa ese archivo desde la raíz del proyecto cuando se ejecuta desde `backend`. Los campos de usuario y contraseña son marcadores; se deben reemplazar en el equipo local por la dirección Gmail y una contraseña de aplicación de Google, nunca por la contraseña normal ni enviándola por el chat. Verificación: `mvn -q -DskipTests compile` completado y se confirmó que `.env` está en `.gitignore`. No se probó la autenticación/envío porque no se proporcionaron credenciales reales y Docker no estaba iniciado.
+
+### Diagnóstico y corrección de correo SMTP con certificado Avast
+
+El registro de Spring indicaba `PKIX path building failed` durante STARTTLS. Se inspeccionó la cadena SMTP sin enviar credenciales: Windows confía en el certificado raíz `Avast Web/Mail Shield Root`, mientras que el truststore estándar de Java lo rechazaba. Se verificó que Java 21 puede establecer TLS 1.3 para `smtp.gmail.com` usando el almacén de certificados confiables de Windows (`Windows-ROOT`). El perfil Maven `windows-trust-store` activa esa integración solo en Windows para `spring-boot:run`; no desactiva la validación TLS. La importación al truststore global de JDK no se pudo realizar por falta de permisos de administrador, por lo que se evitó cambiarlo.
+
+También se añadió el envío, después de confirmar la transacción de creación, de las credenciales temporales de seguimiento al correo del solicitante. La contraseña solo se mantiene en memoria durante el envío; no se registra en logs ni se almacena en texto plano. La interfaz aclara que el sistema intentará enviar una copia y que Talento Humano puede entregar las credenciales manualmente si no llega. `mvn -q -DskipTests compile`, `npm run build` y `git diff --check` completaron correctamente. La conexión STARTTLS de Java 21 a Gmail se verificó en modo de solo conexión usando `Windows-ROOT`; no se autenticó ni se remitió un correo real desde este entorno. Pendiente: reiniciar el backend con `mvn spring-boot:run`, crear una solicitud de prueba y confirmar en consola `Credenciales de seguimiento enviadas` y `Aviso enviado`.
+
+### Auditoría de solicitudes y exportación
+
+Se amplió `paz_salvo_audit` con la IP del cliente y se centralizó la captura de eventos para registrar fecha/hora, actor, acción, detalle y dirección IP remota al crear solicitudes, actualizar datos laborales/respuestas, firmar (P12 o demo), cambiar estado y eliminar solicitudes. El historial de una solicitud muestra también la IP. La eliminación conserva los eventos asociados en la tabla de auditoría para no borrar el rastro.
+
+Talento Humano dispone de **Exportar auditoría (CSV)** compatible con Excel, separado del reporte de datos y respuestas. Incluye solicitud, servidor, acción, usuario, fecha/hora, IP y detalle. `ddl-auto: update` añade la nueva columna nullable al iniciar el backend. En localhost la IP puede mostrarse como loopback; detrás de un proxy se registrará la IP de conexión que ve Spring a menos que se configure el proxy de confianza. Verificación: `mvn -q -DskipTests compile`, `npm run build` y `git diff --check` completados; no se ejecutó un flujo con base de datos/navegador.
+
+### Enrutamiento del aviso inicial al director de la unidad correcta
+
+Se corrigió el alta de solicitudes para que Talento Humano registre primero la Dirección / unidad del servidor saliente y el sistema asigne automáticamente al único director activo de esa unidad. La interfaz ya no permite escoger manualmente al director; si hay cero o varias cuentas activas para esa unidad, el alta se bloquea y solicita corregir la configuración. La API valida la unicidad y guarda esa unidad en la solicitud desde su creación; el director conserva la responsabilidad de completar el resto de datos laborales. Así, el aviso inicial de `DIRECCION_UNIDAD` va al director vinculado a esa unidad.
+
+Se unificó el comportamiento de desplazamiento para todas las ventanas modales (administración de usuarios, firma, alta, credenciales e historial). El fondo permite desplazamiento cuando la ventana es más alta que la pantalla y cada modal conserva su propio scroll vertical, también en pantallas pequeñas, para que todos los campos y acciones sean accesibles.
+
+### Organización de cuentas de seguimiento
+
+En Administración de usuarios, las cuentas institucionales se muestran en su propia lista y las cuentas `SOLICITANTE` quedan separadas en un bloque plegable con su cantidad. No se desactivan automáticamente al cerrar el trámite: el exservidor puede seguir consultando la decisión final y descargar el documento consolidado. Las cuentas y las solicitudes se conservan para mantener trazabilidad.
+
+### Padrón de personal importable desde Excel
+
+Se agregó un padrón institucional separado de las solicitudes, importable por Talento Humano desde archivos `.xlsx` o `.xls` de hasta 10 MB. La plantilla descargable define los encabezados; son obligatorios cédula, nombres y apellidos, y dirección/unidad. La importación hace upsert por cédula, conserva filas válidas y reporta errores por número de fila. El archivo se procesa en memoria y no se guarda como adjunto; los datos de cada persona sí se guardan en una tabla propia. La API de importación y búsqueda exige rol Talento Humano.
+
+Al ingresar una cédula de diez dígitos en una solicitud nueva, el frontend busca el padrón y rellena los datos personales y laborales disponibles. Talento Humano puede revisar y corregir los campos antes de registrar la solicitud. La unidad del padrón queda seleccionada y el director responsable se asigna a partir de ella; si no hay exactamente un director activo configurado, la creación se bloquea. Si la cédula no está en el padrón, se permite continuar con el llenado manual. Verificación: `mvn -q -DskipTests compile` y `npm run build` completados; falta probar con un Excel real de Recursos Humanos.
+
+### Endurecimiento inicial para certificados digitales
+
+Se eliminó el guardado de la cabecera HTTP Basic (que contiene la contraseña codificada, no cifrada) en `sessionStorage`; la autenticación queda solo en memoria y al recargar la página se requiere iniciar sesión de nuevo. El navegador vacía el campo de contraseña y libera las referencias al archivo P12 al enviar la operación. En backend ya se convertía la contraseña a `char[]` y se limpiaban tanto ese arreglo como los bytes del P12 en `finally`; no se guardan esos secretos en base de datos ni en los logs de aplicación.
+
+Se añadieron encabezados HTTP de seguridad, CORS configurable centralmente y un perfil `production` que exige HTTPS, valida el esquema existente (`ddl-auto: validate`), exige secretos/rutas/orígenes explícitos y deshabilita las rutas de firma DEMO. La firma DEMO continúa disponible fuera de ese perfil para pruebas locales. Para desplegar producción es obligatorio terminar TLS en un proxy confiable y restringir CORS al dominio institucional HTTPS. Compilación backend (`mvn '-Dmaven.test.skip=true' compile`) y frontend (`npm run build`) completadas.
+
+Pendiente para aceptar firmas institucionales como prueba de identidad confiable: recibir la lista oficial de autoridades certificadoras/raíces de confianza y el formato oficial de identificación presente en los certificados, para validar cadena, revocación (CRL/OCSP) y correspondencia entre certificado y cuenta del funcionario. Actualmente se verifica vigencia temporal y uso de clave, pero esas comprobaciones no demuestran por sí solas que el certificado pertenezca al usuario autenticado. No desplegar como servicio de firma institucional hasta completar esa validación y una revisión de seguridad operativa (proxy, firewall, secretos, respaldos y permisos del directorio de documentos).

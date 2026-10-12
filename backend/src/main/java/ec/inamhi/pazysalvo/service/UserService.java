@@ -164,23 +164,29 @@ public class UserService implements UserDetailsService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Selecciona Director de unidad o un área responsable.");
         }
         boolean isDirector = nextArea == Area.DIRECCION_UNIDAD;
+        boolean areaChanged = user.getArea() != nextArea;
         if (isDirector && (command.workUnit() == null || command.workUnit().isBlank())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Indica la unidad que dirige esta cuenta.");
         }
-        if (user.getArea() != nextArea) {
+        if (areaChanged) {
             user.setArea(nextArea);
             user.setAssignedQuestionKeys(Set.of());
         }
         if (isDirector) {
             String nextWorkUnit = command.workUnit().trim();
-            if (!sameUnit(user.getWorkUnit(), nextWorkUnit)) {
+            boolean workUnitChanged = !sameUnit(user.getWorkUnit(), nextWorkUnit);
+            if (workUnitChanged) {
                 user.setAssignedQuestionKeys(Set.of());
             }
             Set<String> assignedKeys = user.getAssignedQuestionKeys().stream()
                 .map(key -> baseQuestionKey(user, key))
                 .filter(key -> !isDirectionUnitQuestion(key))
                 .collect(java.util.stream.Collectors.toSet());
-            validateQuestionAssignments(user.getRole(), user.getArea(), nextWorkUnit, assignedKeys, userId);
+            // A profile-only edit (name, username, or email) must not be blocked by
+            // legacy question assignments. Revalidate only when their area scope changes.
+            if (areaChanged || workUnitChanged) {
+                validateQuestionAssignments(user.getRole(), user.getArea(), nextWorkUnit, assignedKeys, userId);
+            }
             user.setWorkUnit(nextWorkUnit);
             user.setAssignedQuestionKeys(storedQuestionKeys(user, assignedKeys));
         } else {

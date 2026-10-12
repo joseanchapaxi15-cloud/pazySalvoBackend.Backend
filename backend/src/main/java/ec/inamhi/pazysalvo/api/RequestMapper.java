@@ -26,33 +26,28 @@ public final class RequestMapper {
             .map(section -> toSectionView(section, actor))
             .toList();
 
-        if (actor.getRole() == UserRole.SOLICITANTE) {
-            return new RequestView(request.getId(), request.getFullName(), null, null, null, null,
-                null, null, null, null, null, null, null, null, null, null, null, null,
-                request.getStatus(), request.getCreatedAt(), null, null, sections);
-        }
         return new RequestView(
             request.getId(),
             request.getFullName(),
             request.getIdentification(),
             request.getEmail(),
-            canSeeWorkDetails(actor) ? request.getJobTitle() : null,
-            canSeeWorkDetails(actor) ? request.getWorkUnit() : null,
-            actor.getRole() == UserRole.TALENTO_HUMANO ? request.getEmploymentType() : null,
-            actor.getRole() == UserRole.TALENTO_HUMANO ? request.getStartDate() : null,
-            actor.getRole() == UserRole.TALENTO_HUMANO ? request.getDepartureDate() : null,
-            actor.getRole() == UserRole.TALENTO_HUMANO ? request.getHomeAddress() : null,
-            actor.getRole() == UserRole.TALENTO_HUMANO ? request.getHomePhone() : null,
-            actor.getRole() == UserRole.TALENTO_HUMANO ? request.getProvince() : null,
-            actor.getRole() == UserRole.TALENTO_HUMANO ? request.getMobilePhone() : null,
-            actor.getRole() == UserRole.TALENTO_HUMANO ? request.getCanton() : null,
-            actor.getRole() == UserRole.TALENTO_HUMANO ? request.getEmergencyContact() : null,
-            actor.getRole() == UserRole.TALENTO_HUMANO ? request.getSecondaryEmail() : null,
-            canSeeWorkDetails(actor) ? request.getWorkplace() : null,
-            canSeeWorkDetails(actor) ? request.getOccupationalGroup() : null,
+            (canSeeWorkDetails(actor) || actor.getRole() == UserRole.SOLICITANTE) ? request.getJobTitle() : null,
+            (canSeeWorkDetails(actor) || actor.getRole() == UserRole.SOLICITANTE) ? request.getWorkUnit() : null,
+            (actor.getRole() == UserRole.TALENTO_HUMANO || actor.getRole() == UserRole.SOLICITANTE) ? request.getEmploymentType() : null,
+            (actor.getRole() == UserRole.TALENTO_HUMANO || actor.getRole() == UserRole.SOLICITANTE) ? request.getStartDate() : null,
+            (actor.getRole() == UserRole.TALENTO_HUMANO || actor.getRole() == UserRole.SOLICITANTE) ? request.getDepartureDate() : null,
+            (actor.getRole() == UserRole.TALENTO_HUMANO || actor.getRole() == UserRole.SOLICITANTE) ? request.getHomeAddress() : null,
+            (actor.getRole() == UserRole.TALENTO_HUMANO || actor.getRole() == UserRole.SOLICITANTE) ? request.getHomePhone() : null,
+            (actor.getRole() == UserRole.TALENTO_HUMANO || actor.getRole() == UserRole.SOLICITANTE) ? request.getProvince() : null,
+            (actor.getRole() == UserRole.TALENTO_HUMANO || actor.getRole() == UserRole.SOLICITANTE) ? request.getMobilePhone() : null,
+            (actor.getRole() == UserRole.TALENTO_HUMANO || actor.getRole() == UserRole.SOLICITANTE) ? request.getCanton() : null,
+            (actor.getRole() == UserRole.TALENTO_HUMANO || actor.getRole() == UserRole.SOLICITANTE) ? request.getEmergencyContact() : null,
+            (actor.getRole() == UserRole.TALENTO_HUMANO || actor.getRole() == UserRole.SOLICITANTE) ? request.getSecondaryEmail() : null,
+            (canSeeWorkDetails(actor) || actor.getRole() == UserRole.SOLICITANTE) ? request.getWorkplace() : null,
+            (canSeeWorkDetails(actor) || actor.getRole() == UserRole.SOLICITANTE) ? request.getOccupationalGroup() : null,
             request.getStatus(),
             request.getCreatedAt(),
-            request.getSignedDocumentSha256(),
+            actor.getRole() == UserRole.RESPONSABLE_AREA ? null : request.getSignedDocumentSha256(),
             request.getSignedDocumentUploadedAt(),
             sections
         );
@@ -65,15 +60,11 @@ public final class RequestMapper {
     }
 
     private static SectionView toSectionView(AreaSection section, UserAccount actor) {
-        if (actor.getRole() == UserRole.SOLICITANTE) {
-            return new SectionView(section.getId(), section.getArea(), section.getSequenceNumber(),
-                section.getStatus(), null, null, null, null, null, null, List.of());
-        }
         List<AnswerView> answers = section.getAnswers().stream()
-            .filter(answer -> actor.getRole() == UserRole.TALENTO_HUMANO
+            .filter(answer -> actor.getRole() == UserRole.TALENTO_HUMANO || actor.getRole() == UserRole.SOLICITANTE
                 || assignedTo(answer, section, actor))
             .sorted(Comparator.comparing(Answer::getQuestionKey))
-            .map(answer -> toAnswerView(answer, section))
+            .map(answer -> toAnswerView(answer, section, actor))
             .toList();
 
         return new SectionView(
@@ -83,7 +74,8 @@ public final class RequestMapper {
             section.getStatus(),
             section.getAssignedUser() == null ? null : section.getAssignedUser().getId(),
             section.getAssignedUser() == null ? null : section.getAssignedUser().getFullName(),
-            section.getAssignedUser() == null ? null : section.getAssignedUser().getEmail(),
+            actor.getRole() == UserRole.SOLICITANTE || section.getAssignedUser() == null
+                ? null : section.getAssignedUser().getEmail(),
             section.getSignerName(),
             section.getSignerEmail(),
             section.getSignedAt(),
@@ -91,7 +83,7 @@ public final class RequestMapper {
         );
     }
 
-    private static AnswerView toAnswerView(Answer answer, AreaSection section) {
+    private static AnswerView toAnswerView(Answer answer, AreaSection section, UserAccount actor) {
         UserAccount assignee = answer.getAssignedUser() == null
             ? section.getAssignedUser() : answer.getAssignedUser();
         return new AnswerView(
@@ -102,11 +94,14 @@ public final class RequestMapper {
             answer.getAmount(),
             assignee == null ? null : assignee.getId(),
             assignee == null ? null : assignee.getFullName(),
+            assignee != null && assignee.isEnabled(),
             answer.getSignerName(),
-            answer.getSignerEmail(),
+            actor.getRole() == UserRole.SOLICITANTE ? null : answer.getSignerEmail(),
             answer.getSignedAt(),
             answer.getSignedDocumentSha256(),
-            answer.getWritingFields().isEmpty() ? QuestionCatalog.writingFieldsForKey(answer.getQuestionKey()) : answer.getWritingFields()
+            answer.getQuestionKey().contains("_custom_")
+                ? answer.getWritingFields()
+                : QuestionCatalog.writingFieldsForKey(answer.getQuestionKey())
         );
     }
 

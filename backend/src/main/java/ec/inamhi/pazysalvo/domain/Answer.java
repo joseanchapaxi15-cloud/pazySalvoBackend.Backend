@@ -92,4 +92,5 @@ public class Answer {
         this.detail = detail;
         this.amount = amount;
     }
+    public void setAmount(BigDecimal amount) { this.amount = amount; }
 }

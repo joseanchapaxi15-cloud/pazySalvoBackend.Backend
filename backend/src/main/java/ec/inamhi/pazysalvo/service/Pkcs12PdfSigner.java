@@ -98,8 +98,15 @@ public class Pkcs12PdfSigner {
             signature.setSignDate(Calendar.getInstance());
             options.setPreferredSignatureSize(SignatureOptions.DEFAULT_SIGNATURE_SIZE * 2);
 
-            document.addSignature(signature, content -> createCms(content.readAllBytes(), privateKey,
-                certificate, chain, algorithm), options);
+            document.addSignature(signature, content -> {
+                try {
+                    return createCms(content.readAllBytes(), privateKey, certificate, chain, algorithm);
+                } catch (org.bouncycastle.operator.OperatorCreationException
+                         | org.bouncycastle.cms.CMSException
+                         | java.security.cert.CertificateEncodingException exception) {
+                    throw new IOException("No se pudo crear la firma criptográfica del PDF.", exception);
+                }
+            }, options);
             document.saveIncremental(output);
             return output.toByteArray();
         }

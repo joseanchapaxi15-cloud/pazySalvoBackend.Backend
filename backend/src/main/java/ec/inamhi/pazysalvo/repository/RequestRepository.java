@@ -17,5 +17,19 @@ public interface RequestRepository extends JpaRepository<EmployeeRequest, Long> 
     @EntityGraph(attributePaths = {"sections", "sections.answers", "sections.assignedUser", "sections.answers.assignedUser"})
     Optional<EmployeeRequest> findById(Long id);
 
+    @EntityGraph(attributePaths = {"sections", "sections.answers", "sections.assignedUser",
+        "sections.answers.assignedUser"})
+    @org.springframework.data.jpa.repository.Query(
+        "select request from UserAccount account join account.trackedRequest request where account.id = :userId")
+    Optional<EmployeeRequest> findTrackedRequestByUserId(
+        @org.springframework.data.repository.query.Param("userId") Long userId);
+
+    @org.springframework.data.jpa.repository.Query(
+        "select account.id from UserAccount account "
+            + "where account.id = :userId and account.trackedRequest.id = :requestId")
+    Optional<Long> findTrackingUserLink(
+        @org.springframework.data.repository.query.Param("userId") Long userId,
+        @org.springframework.data.repository.query.Param("requestId") Long requestId);
+
     boolean existsByIdentification(String identification);
 }

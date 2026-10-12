@@ -26,6 +26,10 @@ public final class RequestDtos {
         @NotBlank @Pattern(regexp = "[0-9]{1,10}", message = "La cédula debe contener solo números y máximo 10 dígitos.") String identification,
         @NotBlank @Email String email,
         @NotBlank @Email String secondaryEmail,
+        @NotBlank String workUnit,
+        String jobTitle,
+        String workplace,
+        String occupationalGroup,
         @NotNull Long directionResponsibleId,
         @NotBlank @Pattern(regexp = "Nombramiento permanente|Nombramiento provisional|Contrato ocasional|Contrato de trabajo") String employmentType,
         @jakarta.validation.constraints.NotNull LocalDate startDate,
@@ -71,6 +75,7 @@ public final class RequestDtos {
         BigDecimal amount,
         Long assignedUserId,
         String assignedUserName,
+        boolean assignedUserEnabled,
         String signerName,
         String signerEmail,
         Instant signedAt,
@@ -130,7 +135,8 @@ public final class RequestDtos {
         String action,
         String actor,
         Instant occurredAt,
-        String details
+        String details,
+        String ipAddress
     ) {
     }
 }

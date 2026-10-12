@@ -22,7 +22,6 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -42,7 +41,6 @@ import java.util.List;
 @Validated
 @RestController
 @RequestMapping("/requests")
-@CrossOrigin(origins = {"http://localhost:4200"})
 public class RequestController {
 
     private final RequestService requestService;
@@ -91,8 +89,9 @@ public class RequestController {
 
     @DeleteMapping("/{requestId}")
     @PreAuthorize("hasRole('TALENTO_HUMANO')")
-    public ResponseEntity<Void> delete(@PathVariable Long requestId) {
-        requestService.deleteRequest(requestId);
+    public ResponseEntity<Void> delete(@PathVariable Long requestId,
+                                       @AuthenticationPrincipal UserAccount actor) {
+        requestService.deleteRequest(requestId, actor.getUsername());
         return ResponseEntity.noContent().build();
     }
 
@@ -107,22 +106,41 @@ public class RequestController {
         return RequestMapper.toView(request, actor);
     }
 
-    @PostMapping("/{requestId}/sections/{sectionId}/confirm")
+    @PostMapping(value = "/{requestId}/sections/{sectionId}/sign", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @Transactional
-    public RequestView confirmSection(@PathVariable Long requestId,
-                                      @PathVariable Long sectionId,
-                                      @AuthenticationPrincipal UserAccount actor) {
+    public RequestView signSectionWithP12(@PathVariable Long requestId,
+                                          @PathVariable Long sectionId,
+                                          @RequestParam("certificate") MultipartFile certificate,
+                                          @RequestParam("password") String password,
+                                          @AuthenticationPrincipal UserAccount actor) {
+        signedDocumentService.signSectionWithCertificate(requestId, sectionId, certificate, password, actor);
         return RequestMapper.toView(requestService.signSection(requestId, sectionId, actor), actor);
     }
 
-    @PostMapping("/{requestId}/sections/{sectionId}/signed-document")
+    @PostMapping("/{requestId}/sections/{sectionId}/sign-demo")
     @Transactional
-    public RequestView uploadSignedSection(@PathVariable Long requestId,
-                                           @PathVariable Long sectionId,
-                                           @RequestParam("file") MultipartFile file,
-                                           @AuthenticationPrincipal UserAccount actor) {
-        signedDocumentService.uploadSection(requestId, sectionId, file, actor);
+    public RequestView signSectionDemo(@PathVariable Long requestId,
+                                       @PathVariable Long sectionId,
+                                       @AuthenticationPrincipal UserAccount actor) {
+        signedDocumentService.signSectionDemo(requestId, sectionId, actor);
         return RequestMapper.toView(requestService.signSection(requestId, sectionId, actor), actor);
+    }
+
+    @PostMapping(value = "/{requestId}/sign-final", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @Transactional
+    public RequestView signFinalWithP12(@PathVariable Long requestId,
+                                        @RequestParam("certificate") MultipartFile certificate,
+                                        @RequestParam("password") String password,
+                                        @AuthenticationPrincipal UserAccount actor) {
+        return RequestMapper.toView(signedDocumentService.signFinalDocumentWithCertificate(
+            requestId, certificate, password, actor), actor);
+    }
+
+    @PostMapping("/{requestId}/sign-final-demo")
+    @Transactional
+    public RequestView signFinalDemo(@PathVariable Long requestId,
+                                     @AuthenticationPrincipal UserAccount actor) {
+        return RequestMapper.toView(signedDocumentService.signFinalDocumentDemo(requestId, actor), actor);
     }
 
     @GetMapping("/{requestId}/sections/{sectionId}/signed-document")
@@ -188,27 +206,18 @@ public class RequestController {
             .body(resource);
     }
 
-    @PostMapping("/{requestId}/signed-document")
-    @PreAuthorize("hasRole('TALENTO_HUMANO')")
-    @Transactional
-    public RequestView uploadSignedDocument(@PathVariable Long requestId,
-                                            @RequestParam("file") MultipartFile file,
-                                            @AuthenticationPrincipal UserAccount actor) {
-        return RequestMapper.toView(signedDocumentService.upload(
-            requestId, file, actor.getUsername()), actor);
-    }
-
     @GetMapping("/{requestId}/signed-document")
     public ResponseEntity<Resource> downloadSignedDocument(
         @PathVariable Long requestId,
         @AuthenticationPrincipal UserAccount actor
     ) throws IOException {
-        if (actor.getRole() == ec.inamhi.pazysalvo.domain.UserRole.SOLICITANTE) {
+        EmployeeRequest request = requestService.findVisibleById(requestId, actor);
+        if (actor.getRole() == ec.inamhi.pazysalvo.domain.UserRole.SOLICITANTE
+                && request.getSignedDocumentPath() == null) {
             throw new org.springframework.web.server.ResponseStatusException(
-                org.springframework.http.HttpStatus.FORBIDDEN,
-                "La cuenta de seguimiento solo permite consultar el avance del trámite.");
+                org.springframework.http.HttpStatus.CONFLICT,
+                "El documento final todavía no está firmado.");
         }
-        requestService.findVisibleById(requestId, actor);
         Path path = signedDocumentService.locate(requestId);
         Resource resource = new FileSystemResource(path);
         return ResponseEntity.ok()
@@ -235,7 +244,7 @@ public class RequestController {
     public List<AuditView> audit(@PathVariable Long requestId) {
         return requestService.history(requestId).stream()
             .map(entry -> new AuditView(entry.getId(), entry.getAction(), entry.getActor(),
-                entry.getOccurredAt(), entry.getDetails()))
+                entry.getOccurredAt(), entry.getDetails(), entry.getIpAddress()))
             .toList();
     }
 
