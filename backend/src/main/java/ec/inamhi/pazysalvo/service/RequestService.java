@@ -99,7 +99,7 @@ public class RequestService {
         List<UserAccount> directorsForUnit = userRepository
             .findAllByRoleAndArea(UserRole.RESPONSABLE_AREA, Area.DIRECCION_UNIDAD).stream()
             .filter(UserAccount::isEnabled)
-            .filter(user -> sameUnit(user.getWorkUnit(), command.workUnit()))
+            .filter(user -> sameRequestUnit(user.getWorkUnit(), command.workUnit()))
             .toList();
         if (directorsForUnit.size() != 1
             || !directorsForUnit.getFirst().getId().equals(command.directionResponsibleId())) {
@@ -471,9 +471,14 @@ public class RequestService {
         return left != null && right != null && normalizeUnit(left).equals(normalizeUnit(right));
     }
 
+    private boolean sameRequestUnit(String directorUnit, String employeeUnit) {
+        return sameUnit(directorUnit, employeeUnit);
+    }
+
     private String normalizeUnit(String unit) {
         return unit == null ? "" : java.text.Normalizer.normalize(unit.trim(), java.text.Normalizer.Form.NFD)
-            .replaceAll("\\p{M}", "").replaceAll("\\s+", " ").toLowerCase(java.util.Locale.ROOT);
+            .replaceAll("\\p{M}", "").replaceAll("\\s+", " ").toLowerCase(java.util.Locale.ROOT)
+            .replace("adminsitrativa", "administrativa");
     }
 
     private EmployeeRequest load(Long id) {

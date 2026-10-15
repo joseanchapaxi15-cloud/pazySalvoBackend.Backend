@@ -17,6 +17,11 @@ import org.springframework.security.config.annotation.web.configurers.HeadersCon
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
+import org.springframework.security.web.context.SecurityContextRepository;
+import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
+import org.springframework.security.web.csrf.CsrfTokenRepository;
+import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
@@ -57,9 +62,26 @@ public class SecurityConfig {
     }
 
     @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+    public SecurityContextRepository securityContextRepository() {
+        return new HttpSessionSecurityContextRepository();
+    }
+
+    @Bean
+    public CsrfTokenRepository csrfTokenRepository() {
+        CookieCsrfTokenRepository repository = CookieCsrfTokenRepository.withHttpOnlyFalse();
+        repository.setCookiePath("/");
+        return repository;
+    }
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http,
+            SecurityContextRepository securityContextRepository,
+            CsrfTokenRepository csrfTokenRepository) throws Exception {
         http
-            .csrf(csrf -> csrf.disable())
+            .csrf(csrf -> csrf
+                .csrfTokenRepository(csrfTokenRepository)
+                .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler()))
+            .securityContext(context -> context.securityContextRepository(securityContextRepository))
             .cors(Customizer.withDefaults())
             .headers(headers -> headers
                 .frameOptions(HeadersConfigurer.FrameOptionsConfig::deny)
@@ -70,11 +92,13 @@ public class SecurityConfig {
                     org.springframework.security.web.header.writers.ReferrerPolicyHeaderWriter.ReferrerPolicy.STRICT_ORIGIN_WHEN_CROSS_ORIGIN))
                 .permissionsPolicy(policy -> policy.policy("camera=(), microphone=(), geolocation=()")))
             .sessionManagement(session -> session
-                .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED)
+                .sessionFixation(fixation -> fixation.changeSessionId()))
             .authorizeHttpRequests(authorize -> authorize
                 .requestMatchers("/auth/login").permitAll()
+                .requestMatchers("/auth/csrf").permitAll()
                 .anyRequest().authenticated())
-            .httpBasic(Customizer.withDefaults());
+            ;
         if (requireHttps) {
             http.requiresChannel(channel -> channel.anyRequest().requiresSecure());
         }
@@ -87,8 +111,9 @@ public class SecurityConfig {
         configuration.setAllowedOrigins(Arrays.stream(allowedOrigins.split(","))
             .map(String::trim).filter(origin -> !origin.isEmpty()).toList());
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
-        configuration.setAllowedHeaders(List.of("Authorization", "Content-Type"));
+        configuration.setAllowedHeaders(List.of("Authorization", "Content-Type", "X-XSRF-TOKEN"));
         configuration.setExposedHeaders(List.of("Content-Disposition"));
+        configuration.setAllowCredentials(true);
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", configuration);
         return source;

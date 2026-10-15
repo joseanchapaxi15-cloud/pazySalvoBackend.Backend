@@ -4,8 +4,12 @@ import ec.inamhi.pazysalvo.api.UserDtos.CreateUserCommand;
 import ec.inamhi.pazysalvo.api.UserDtos.UpdateUserCommand;
 import ec.inamhi.pazysalvo.api.UserDtos.UserView;
 import ec.inamhi.pazysalvo.domain.Area;
+import ec.inamhi.pazysalvo.domain.Answer;
+import ec.inamhi.pazysalvo.domain.EmployeeRequest;
 import ec.inamhi.pazysalvo.domain.UserAccount;
 import ec.inamhi.pazysalvo.domain.UserRole;
+import ec.inamhi.pazysalvo.repository.RequestRepository;
+import ec.inamhi.pazysalvo.repository.DirectoryEmployeeRepository;
 import ec.inamhi.pazysalvo.repository.UserRepository;
 import ec.inamhi.pazysalvo.api.UserDtos.QuestionOption;
 import org.springframework.http.HttpStatus;
@@ -26,12 +30,17 @@ import java.security.SecureRandom;
 public class UserService implements UserDetailsService {
 
     private final UserRepository userRepository;
+    private final RequestRepository requestRepository;
+    private final DirectoryEmployeeRepository directoryEmployeeRepository;
     private final PasswordEncoder passwordEncoder;
     private final QuestionCatalog questionCatalog;
 
-    public UserService(UserRepository userRepository, PasswordEncoder passwordEncoder,
+    public UserService(UserRepository userRepository, RequestRepository requestRepository,
+                       DirectoryEmployeeRepository directoryEmployeeRepository, PasswordEncoder passwordEncoder,
                        QuestionCatalog questionCatalog) {
         this.userRepository = userRepository;
+        this.requestRepository = requestRepository;
+        this.directoryEmployeeRepository = directoryEmployeeRepository;
         this.passwordEncoder = passwordEncoder;
         this.questionCatalog = questionCatalog;
     }
@@ -71,9 +80,13 @@ public class UserService implements UserDetailsService {
                 "Ese correo ya está asociado a otra cuenta.");
         }
         validateArea(command.role(), command.area(), command.workUnit());
+        if (command.role() == UserRole.RESPONSABLE_AREA && command.area() == Area.DIRECCION_UNIDAD) {
+            ensureUnitHasNoOtherActiveDirector(command.workUnit(), null);
+        }
         Set<String> questionKeys = new HashSet<>(
             command.questionKeys() == null ? List.of() : command.questionKeys());
-        validateQuestionAssignments(command.role(), command.area(), command.workUnit(), questionKeys, null);
+        validateQuestionAssignments(command.role(), command.area(), command.workUnit(), questionKeys, null,
+            command.area() != Area.DIRECCION_UNIDAD);
 
         UserAccount user = new UserAccount(
             username,
@@ -86,7 +99,11 @@ public class UserService implements UserDetailsService {
         user.setWorkUnit(command.area() == Area.DIRECCION_UNIDAD
             ? command.workUnit().trim() : null);
         user.setAssignedQuestionKeys(storedQuestionKeys(user, questionKeys));
-        return toView(userRepository.save(user));
+        UserAccount saved = userRepository.save(user);
+        if (command.role() == UserRole.RESPONSABLE_AREA && command.area() != Area.DIRECCION_UNIDAD) {
+            transferQuestionsFromAreaDirector(command.area(), saved, questionKeys);
+        }
+        return toView(saved);
     }
 
     @Transactional(readOnly = true)
@@ -116,6 +133,14 @@ public class UserService implements UserDetailsService {
 
     @Transactional(readOnly = true)
     public List<String> directionUnits() {
+        List<String> units = directoryEmployeeRepository.findAll().stream()
+            .map(employee -> employee.getWorkUnit())
+            .filter(unit -> unit != null && !unit.isBlank())
+            .map(String::trim)
+            .distinct()
+            .sorted(String.CASE_INSENSITIVE_ORDER)
+            .toList();
+        if (!units.isEmpty()) return units;
         return userRepository.findAllByRoleAndArea(UserRole.RESPONSABLE_AREA, Area.DIRECCION_UNIDAD).stream()
             .filter(UserAccount::isEnabled)
             .map(UserAccount::getWorkUnit)
@@ -139,10 +164,28 @@ public class UserService implements UserDetailsService {
         if (user.getArea() == Area.DIRECCION_UNIDAD) {
             // Dirección / unidad is automatic for directors; discard old manually assigned keys.
             questionKeys.removeIf(key -> key == null || baseQuestionKey(user, key).startsWith("direccion_unidad_"));
+            Area operationalArea = Area.fromUnitLabel(user.getWorkUnit());
+            if (operationalArea != null) {
+                Set<String> keysOwnedByAreaResponsibles = userRepository
+                    .findAllByRoleAndArea(UserRole.RESPONSABLE_AREA, operationalArea).stream()
+                    .filter(UserAccount::isEnabled)
+                    .filter(other -> !other.getId().equals(user.getId()))
+                    .flatMap(other -> other.getAssignedQuestionKeys().stream())
+                    .map(key -> baseQuestionKey(user, key))
+                    .collect(java.util.stream.Collectors.toSet());
+                questionKeys.removeAll(keysOwnedByAreaResponsibles);
+            }
         }
-        validateQuestionAssignments(user.getRole(), user.getArea(), user.getWorkUnit(), questionKeys, user.getId());
+        boolean allowDirectorTransfer = user.getArea() != Area.DIRECCION_UNIDAD;
+        validateQuestionAssignments(user.getRole(), user.getArea(), user.getWorkUnit(), questionKeys,
+            user.getId(), allowDirectorTransfer);
         user.setAssignedQuestionKeys(storedQuestionKeys(user, questionKeys));
-        return toView(userRepository.save(user));
+        UserAccount saved = userRepository.save(user);
+        if (allowDirectorTransfer) {
+            transferQuestionsFromAreaDirector(user.getArea(), saved, questionKeys);
+        }
+        reassignUnsignedAnswers(user.getArea(), saved, questionKeys);
+        return toView(saved);
     }
 
     @Transactional
@@ -168,6 +211,7 @@ public class UserService implements UserDetailsService {
         if (isDirector && (command.workUnit() == null || command.workUnit().isBlank())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Indica la unidad que dirige esta cuenta.");
         }
+        if (isDirector) ensureUnitHasNoOtherActiveDirector(command.workUnit(), userId);
         if (areaChanged) {
             user.setArea(nextArea);
             user.setAssignedQuestionKeys(Set.of());
@@ -185,7 +229,7 @@ public class UserService implements UserDetailsService {
             // A profile-only edit (name, username, or email) must not be blocked by
             // legacy question assignments. Revalidate only when their area scope changes.
             if (areaChanged || workUnitChanged) {
-                validateQuestionAssignments(user.getRole(), user.getArea(), nextWorkUnit, assignedKeys, userId);
+                validateQuestionAssignments(user.getRole(), user.getArea(), nextWorkUnit, assignedKeys, userId, false);
             }
             user.setWorkUnit(nextWorkUnit);
             user.setAssignedQuestionKeys(storedQuestionKeys(user, assignedKeys));
@@ -199,6 +243,9 @@ public class UserService implements UserDetailsService {
     @Transactional
     public UserView setEnabled(Long userId, boolean enabled) {
         UserAccount user = getUser(userId);
+        if (enabled && user.getRole() == UserRole.RESPONSABLE_AREA && user.getArea() == Area.DIRECCION_UNIDAD) {
+            ensureUnitHasNoOtherActiveDirector(user.getWorkUnit(), userId);
+        }
         user.setEnabled(enabled);
         if (!enabled) {
             user.setAssignedQuestionKeys(Set.of());
@@ -244,6 +291,17 @@ public class UserService implements UserDetailsService {
             new ResponseStatusException(HttpStatus.NOT_FOUND, "No se encontró la cuenta."));
     }
 
+    private void ensureUnitHasNoOtherActiveDirector(String workUnit, Long excludedUserId) {
+        boolean occupied = userRepository.findAllByRoleAndArea(UserRole.RESPONSABLE_AREA, Area.DIRECCION_UNIDAD).stream()
+            .filter(UserAccount::isEnabled)
+            .filter(user -> excludedUserId == null || !user.getId().equals(excludedUserId))
+            .anyMatch(user -> sameUnit(user.getWorkUnit(), workUnit));
+        if (occupied) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                "Ya existe un director activo para esta dirección/unidad. Edita esa cuenta o desactívala primero.");
+        }
+    }
+
     public static UserView toView(UserAccount user) {
         return new UserView(user.getId(), user.getUsername(), user.getFullName(),
             user.getEmail(), user.getRole(), user.getArea(), user.getWorkUnit(), user.isEnabled(), user.getCreatedAt(),
@@ -267,7 +325,7 @@ public class UserService implements UserDetailsService {
     }
 
     private void validateQuestionAssignments(UserRole role, Area area, String workUnit, Set<String> questionKeys,
-                                             Long excludedUserId) {
+                                             Long excludedUserId, boolean allowDirectorTransfer) {
         if (role == UserRole.TALENTO_HUMANO) {
             if (!questionKeys.isEmpty()) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
@@ -303,11 +361,49 @@ public class UserService implements UserDetailsService {
         boolean alreadyAssigned = eligibleUsers.stream()
             .filter(UserAccount::isEnabled)
             .filter(user -> !user.getId().equals(excludedUserId))
+            .filter(user -> !(allowDirectorTransfer && isDirectorForArea(user, assignableArea)))
             .anyMatch(user -> questionKeys.stream().anyMatch(key -> hasQuestion(user, key)));
         if (alreadyAssigned) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                 "Una o más preguntas ya están asignadas a otro usuario de esta área.");
         }
+    }
+
+    private void transferQuestionsFromAreaDirector(Area area, UserAccount newOwner, Set<String> questionKeys) {
+        if (questionKeys.isEmpty()) return;
+        userRepository.findAllByRoleAndArea(UserRole.RESPONSABLE_AREA, Area.DIRECCION_UNIDAD).stream()
+            .filter(UserAccount::isEnabled)
+            .filter(director -> isDirectorForArea(director, area))
+            .forEach(director -> {
+                Set<String> remainingKeys = new HashSet<>(director.getAssignedQuestionKeys());
+                questionKeys.forEach(key -> {
+                    remainingKeys.remove(key);
+                    remainingKeys.remove(key + "::" + normalizeUnit(director.getWorkUnit()));
+                });
+                director.setAssignedQuestionKeys(remainingKeys);
+                userRepository.save(director);
+            });
+        reassignUnsignedAnswers(area, newOwner, questionKeys);
+    }
+
+    /** Apply administrative reassignment to unanswered/un-signed work already in progress.
+     * Signed answers remain attached to their original signer as immutable evidence.
+     */
+    private void reassignUnsignedAnswers(Area area, UserAccount newOwner, Set<String> questionKeys) {
+        if (area == null || newOwner == null || questionKeys.isEmpty()) return;
+        requestRepository.findAll().stream()
+            .flatMap(request -> request.getSections().stream())
+            .filter(section -> section.getArea() == area)
+            .flatMap(section -> section.getAnswers().stream())
+            .filter(answer -> questionKeys.contains(answer.getQuestionKey()))
+            .filter(answer -> answer.getSignedAt() == null)
+            .forEach(answer -> answer.assignTo(newOwner));
+    }
+
+    private boolean isDirectorForArea(UserAccount user, Area area) {
+        return user.getRole() == UserRole.RESPONSABLE_AREA
+            && user.getArea() == Area.DIRECCION_UNIDAD
+            && Area.fromUnitLabel(user.getWorkUnit()) == area;
     }
 
     private Set<String> storedQuestionKeys(UserAccount user, Set<String> questionKeys) {
@@ -338,6 +434,7 @@ public class UserService implements UserDetailsService {
 
     private String normalizeUnit(String unit) {
         return unit == null ? "" : java.text.Normalizer.normalize(unit.trim(), java.text.Normalizer.Form.NFD)
-            .replaceAll("\\p{M}", "").replaceAll("\\s+", " ").toLowerCase(java.util.Locale.ROOT);
+            .replaceAll("\\p{M}", "").replaceAll("\\s+", " ").toLowerCase(java.util.Locale.ROOT)
+            .replace("adminsitrativa", "administrativa");
     }
 }

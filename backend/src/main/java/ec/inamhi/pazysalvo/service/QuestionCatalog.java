@@ -44,10 +44,12 @@ public class QuestionCatalog {
             Area.TIC, List.of(
                     "Se realizó la verificación del equipo informático",
                     "¿Tiene acceso a IP, Wi-Fi, móvil u otros servicios?",
+                    "Se realizó la liberación",
                     "Se retiró el control de acceso a sistemas de información",
-                    "Se realizó el cierre de cuentas institucionales",
+                    "Se realizó el cierre de correo institucional",
+                    "Se realizó el cierre de quipux",
+                    "Se realizó el cierre de eSIGEFSPRYNeSBye",
                     "Se realizó la entrega y desactivación de la tarjeta de acceso",
-                    "Se realizó la liberación de cuentas y accesos",
                     "Entregó el backup de información generado"
             ),
 
@@ -208,18 +210,18 @@ public class QuestionCatalog {
                             "Observación de la verificación del equipo"
                     );
 
-            case "tic_2",
-                 "tic_3",
-                 "tic_5" ->
+          //  case "tic_2",
+            //     "tic_3",
+              //   "tic_5" ->
 
-                    List.of(
-                            "Correo institucional",
-                            "Quipux",
-                            "eSIGEF",
-                            "SPRYN",
-                            "eSByE",
-                            "Observación"
-                    );
+                //    List.of(
+                  //          "Correo institucional",
+                   //         "Quipux",
+                     //       "eSIGEF",
+                       //     "SPRYN",
+                         //   "eSByE",
+                           // "Observación"
+                    //);
 
             case "tic_4" ->
                     List.of(
